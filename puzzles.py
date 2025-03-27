@@ -317,15 +317,15 @@ def add_vec_block_kernel(
     off_z = off_y[:, None] * N0 + off_x[None, :]
     print("off_z: ", off_z)
 
-    mask_x = off_x<N0
-    mask_y = off_y<N1
+    mask_x = off_x < N0
+    mask_y = off_y < N1
 
     x = tl.load(x_ptr + off_x, mask=off_x < N0)
     y = tl.load(y_ptr + off_y, mask=off_y < N1)
     z = x[None, :] + y[:, None]
     print("z: ", z)
 
-    tl.store(z_ptr + off_z, z, mask = mask_x[None, :] & mask_y[:, None])
+    tl.store(z_ptr + off_z, z, mask=mask_x[None, :] & mask_y[:, None])
     return
 
 
@@ -355,18 +355,17 @@ def mul_relu_block_kernel(
     off_x = block_id_x * B0 + tl.arange(0, B0)
     off_y = block_id_y * B1 + tl.arange(0, B1)
     off_z = off_x[None, :] + off_y[:, None] * N0
-    
+
     mask_x = off_x < N0
     mask_y = off_y < N1
     mask_z = mask_x[None, :] & mask_y[:, None]
 
     x = tl.load(x_ptr + off_x, mask=mask_x)
     y = tl.load(y_ptr + off_y, mask=mask_y)
-    z = x[None, :]*y[:, None]
+    z = x[None, :] * y[:, None]
     z = tl.where(z > 0, z, 0.0)
 
-    tl.store(z_ptr+off_z, z, mask_z)
-
+    tl.store(z_ptr + off_z, z, mask_z)
 
     return
 
@@ -405,9 +404,36 @@ def mul_relu_block_back_spec(
 def mul_relu_block_back_kernel(
     x_ptr, y_ptr, dz_ptr, dx_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr
 ):
+    """
+    forward:
+        z = x * y[None, :]
+        out = relu(z)
+    backward:
+        dx = dz * y[None, :].T
+           = dz * y[:, None]
+
+    """
     block_id_i = tl.program_id(0)
     block_id_j = tl.program_id(1)
-    # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)  # col, as row vector
+    off_j = block_id_j * B1 + tl.arange(0, B1)  # row, as col vector
+    # print(off_i[None, :])
+    # print(off_j[:, None])
+    off_ji = off_i[None, :] + off_j[:, None] * N0
+
+    mask_i = off_i < N0
+    mask_j = off_j < N1
+    mask_ji = mask_j[:, None] & mask_i[None, :]
+
+    x = tl.load(x_ptr + off_ji, mask_ji)
+    dz = tl.load(dz_ptr + off_ji, mask_ji)
+    y = tl.load(y_ptr + off_j, mask_j)
+
+    df_xy = tl.where(x * y[:, None] > 0.0, 1.0, 0.0)  # relu gradient
+    dxy_x = y[:, None]
+    dx = dz * df_xy * dxy_x
+
+    tl.store(dx_ptr + off_ji, dx, mask_ji)
     return
 
 
@@ -432,7 +458,23 @@ def sum_spec(x: Float32[4, 200]) -> Float32[4,]:
 
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
-    # Finish me!
+    block_id = tl.program_id(0)
+
+    off_i = block_id * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+    res = tl.zeros([B0], dtype=tl.float32)  # sum of batch sized B0
+
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+        x = tl.load(x_ptr + off_ij, mask=mask_ij)
+        res += tl.sum(x, axis=1)
+
+    tl.store(z_ptr + off_i, res, mask=mask_i)
+
     return
 
 
@@ -473,7 +515,40 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     """2 loops ver."""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
-    # Finish me!
+    
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    prev_max_x = tl.zeros([B0], dtype=tl.float32)
+    curr_max_x = tl.zeros([B0], dtype=tl.float32)
+    exp_sum = tl.zeros([B0], dtype=tl.float32)
+    
+    # online softmax
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        x = tl.load(x_ptr + off_ij, mask_ij)
+        # update the running max_x with current [B0, B1]
+        curr_max_x = tl.maximum(prev_max_x, tl.max(x, axis=1))
+        curr_exp_x = tl.exp2(log2_e * (x - curr_max_x[:, None]))
+        scale = tl.exp2(log2_e * (prev_max_x - curr_max_x))
+        exp_sum = exp_sum * scale + tl.sum(curr_exp_x, axis=1)
+        prev_max_x = curr_max_x
+    
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        x = tl.load(x_ptr + off_ij, mask_ij)
+        exp_x = tl.exp2(log2_e * (x - curr_max_x[:, None]))
+        z = exp_x / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask_ij)
+
     return
 
 
@@ -484,7 +559,46 @@ def softmax_kernel_brute_force(
     """3 loops ver."""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
-    # Finish me!
+
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    max_x = tl.zeros([B0], dtype=tl.float32)
+    exp_sum = tl.zeros([B0], dtype=tl.float32)
+
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        x = tl.load(x_ptr + off_ij, mask_ij)
+        # update the running max_x with current [B0, B1]
+        max_x = tl.maximum(max_x, tl.max(x, axis=1))
+
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        x = tl.load(x_ptr + off_ij, mask_ij)
+        # max_x reshaped to col vec for broadcast
+        exp_x = tl.exp2(log2_e * (x - max_x[:, None]))
+        # update the running exp_sum [B0, 1] with current sum of [B0, B1]
+        exp_sum += tl.sum(exp_x, axis=1) 
+    
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        off_ij = off_i[:, None] * T + off_j[None, :]
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        x = tl.load(x_ptr + off_ij, mask_ij)
+        exp_x = tl.exp2(log2_e * (x - max_x[:, None]))
+        z = exp_x / exp_sum[:, None]
+        tl.store(z_ptr + off_ij, z, mask_ij)
+
     return
 
 
@@ -769,6 +883,14 @@ def run_puzzles(args, puzzles: List[int]):
             return
     if 8 in puzzles:
         print("Puzzle #8:")
+        ok = test(
+            softmax_kernel_brute_force,
+            softmax_spec,
+            B={"B0": 1, "B1": 32},
+            nelem={"N0": 4, "N1": 32, "T": 200},
+            print_log=print_log,
+            device=device,
+        )
         ok = test(
             softmax_kernel,
             softmax_spec,
