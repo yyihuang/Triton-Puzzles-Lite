@@ -265,22 +265,23 @@ Block size `B1` is always the same as vector `y` length `N1`.
 def add_vec_spec(x: Float32[32,], y: Float32[32,]) -> Float32[32, 32]:
     return x[None, :] + y[:, None]
 
+
 # n0=n1=32
 @triton.jit
 def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr):
-    off_x = tl.arange(0, B0) # col
-    off_y = tl.arange(0, B1) # row
+    off_x = tl.arange(0, B0)  # col
+    off_y = tl.arange(0, B1)  # row
     print("off_x: ", off_x)
     print("off_y: ", off_y)
 
-    off_z = off_x[None, :]+off_y[:, None]*B0
+    off_z = off_x[None, :] + off_y[:, None] * B0
     print("off_z: ", off_z)
 
-    x = tl.load(x_ptr+off_x)
-    y = tl.load(y_ptr+off_y)
+    x = tl.load(x_ptr + off_x)
+    y = tl.load(y_ptr + off_y)
     z = x[None, :] + y[:, None]
-    print("z: ",z)
-    tl.store(z_ptr+off_z, z)
+    print("z: ", z)
+    tl.store(z_ptr + off_z, z)
 
     return
 
@@ -308,7 +309,23 @@ def add_vec_block_kernel(
 ):
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
-    # Finish me!
+    off_x = block_id_x * B0 + tl.arange(0, B0)  # col
+    off_y = block_id_y * B1 + tl.arange(0, B1)  # row
+    print("off_x: ", off_x)
+    print("off_y: ", off_y)
+
+    off_z = off_y[:, None] * N0 + off_x[None, :]
+    print("off_z: ", off_z)
+
+    mask_x = off_x<N0
+    mask_y = off_y<N1
+
+    x = tl.load(x_ptr + off_x, mask=off_x < N0)
+    y = tl.load(y_ptr + off_y, mask=off_y < N1)
+    z = x[None, :] + y[:, None]
+    print("z: ", z)
+
+    tl.store(z_ptr + off_z, z, mask = mask_x[None, :] & mask_y[:, None])
     return
 
 
