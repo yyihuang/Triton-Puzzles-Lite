@@ -533,7 +533,7 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
         x = tl.load(x_ptr + off_ij, mask_ij)
         # update the running max_x with current [B0, B1]
         curr_max_x = tl.maximum(prev_max_x, tl.max(x, axis=1))
-        curr_exp_x = tl.exp2(log2_e * (x - curr_max_x[:, None]))
+        curr_exp_x = tl.exp2(log2_e * (x - curr_max_x))
         scale = tl.exp2(log2_e * (prev_max_x - curr_max_x))
         exp_sum = exp_sum * scale + tl.sum(curr_exp_x, axis=1)
         prev_max_x = curr_max_x
@@ -545,7 +545,7 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
         mask_ij = mask_i[:, None] & mask_j[None, :]
 
         x = tl.load(x_ptr + off_ij, mask_ij)
-        exp_x = tl.exp2(log2_e * (x - curr_max_x[:, None]))
+        exp_x = tl.exp2(log2_e * (x - curr_max_x))
         z = exp_x / exp_sum[:, None]
         tl.store(z_ptr + off_ij, z, mask_ij)
 
@@ -584,7 +584,7 @@ def softmax_kernel_brute_force(
 
         x = tl.load(x_ptr + off_ij, mask_ij)
         # max_x reshaped to col vec for broadcast
-        exp_x = tl.exp2(log2_e * (x - max_x[:, None]))
+        exp_x = tl.exp2(log2_e * (x - max_x))
         # update the running exp_sum [B0, 1] with current sum of [B0, B1]
         exp_sum += tl.sum(exp_x, axis=1) 
     
@@ -595,7 +595,7 @@ def softmax_kernel_brute_force(
         mask_ij = mask_i[:, None] & mask_j[None, :]
 
         x = tl.load(x_ptr + off_ij, mask_ij)
-        exp_x = tl.exp2(log2_e * (x - max_x[:, None]))
+        exp_x = tl.exp2(log2_e * (x - max_x))
         z = exp_x / exp_sum[:, None]
         tl.store(z_ptr + off_ij, z, mask_ij)
 
