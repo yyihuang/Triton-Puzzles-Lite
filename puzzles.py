@@ -515,14 +515,14 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     """2 loops ver."""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
-    
+
     off_i = block_id_i * B0 + tl.arange(0, B0)
     mask_i = off_i < N0
 
     prev_max_x = tl.zeros([B0], dtype=tl.float32)
     curr_max_x = tl.zeros([B0], dtype=tl.float32)
     exp_sum = tl.zeros([B0], dtype=tl.float32)
-    
+
     # online softmax
     for j in tl.range(0, T, B1):
         off_j = j + tl.arange(0, B1)
@@ -537,7 +537,7 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
         scale = tl.exp2(log2_e * (prev_max_x - curr_max_x))
         exp_sum = exp_sum * scale + tl.sum(curr_exp_x, axis=1)
         prev_max_x = curr_max_x
-    
+
     for j in tl.range(0, T, B1):
         off_j = j + tl.arange(0, B1)
         mask_j = off_j < T
@@ -586,8 +586,8 @@ def softmax_kernel_brute_force(
         # max_x reshaped to col vec for broadcast
         exp_x = tl.exp2(log2_e * (x - max_x))
         # update the running exp_sum [B0, 1] with current sum of [B0, B1]
-        exp_sum += tl.sum(exp_x, axis=1) 
-    
+        exp_sum += tl.sum(exp_x, axis=1)
+
     for j in tl.range(0, T, B1):
         off_j = j + tl.arange(0, B1)
         mask_j = off_j < T
@@ -661,8 +661,10 @@ def flashatt_kernel(
         qk_prod = q[:, None] * k[None, :] + tl.where(mask_ij, 0, -inf)
 
         curr_qk_prod_max = tl.maximum(qk_prod_max, tl.max(qk_prod, axis=1))
-        scale = tl.exp2(log2_e * (qk_prod_max - curr_qk_prod_max)) # exp(m_i-1 - m_i)
-        qk_prod_exp = tl.exp2(log2_e * (qk_prod - curr_qk_prod_max[:, None])) # max should be broadcast
+        scale = tl.exp2(log2_e * (qk_prod_max - curr_qk_prod_max))  # exp(m_i-1 - m_i)
+        qk_prod_exp = tl.exp2(
+            log2_e * (qk_prod - curr_qk_prod_max[:, None])
+        )  # max should be broadcast
         qk_prod_max = curr_qk_prod_max
 
         curr_sum_exp = sum_exp * scale + tl.sum(qk_prod_exp, axis=1)
@@ -712,12 +714,11 @@ def conv2d_kernel(
     off_h = tl.arange(0, KH)
     off_w = tl.arange(0, KW)
     off_hw = off_h[:, None] * KW + off_w[None, :]
-    k = tl.load(k_ptr + off_hw) # kernel
+    k = tl.load(k_ptr + off_hw)  # kernel
 
     for j in tl.range(0, H):
         for w in tl.range(0, W):
-            pass # todo
-
+            pass  # todo
 
     return
 
@@ -764,7 +765,44 @@ def dot_kernel(
     block_id_j = tl.program_id(0)
     block_id_k = tl.program_id(1)
     block_id_i = tl.program_id(2)
-    # Finish me!
+
+    off_i = block_id_i * B2 + tl.arange(0, B2)  # batches
+    off_j = block_id_j * B0 + tl.arange(0, B0)  # rows
+    off_k = block_id_k * B1 + tl.arange(0, B1)  # cols
+
+    mask_i = off_i < N2
+    mask_j = off_j < N0
+    mask_k = off_k < N1
+
+    z = tl.zeros((B2, B0, B1), dtype=tl.float32)
+    off_z = (
+        off_i[:, None, None] * N0 * N1
+        + off_j[None, :, None] * N1
+        + off_k[None, None, :] * 1
+    )
+    mask_z = mask_i[:, None, None] & mask_j[None, :, None] & mask_k[None, None, :]
+
+    for m in tl.range(0, MID, B_MID):
+        off_m = m + tl.arange(0, B_MID)
+        mask_m = off_m < MID
+        off_x = (
+            off_i[:, None, None] * N0 * MID
+            + off_j[None, :, None] * MID
+            + off_m[None, None, :] * 1
+        )
+        off_y = (
+            off_i[:, None, None] * MID * N1
+            + off_m[None, :, None] * N1
+            + off_k[None, None, :] * 1
+        )
+        mask_x = mask_i[:, None, None] & mask_j[None, :, None] & mask_m[None, None, :]
+        mask_y = mask_i[:, None, None] & mask_m[None, :, None] & mask_k[None, None, :]
+        x = tl.load(x_ptr + off_x, mask_x)
+        y = tl.load(y_ptr + off_y, mask_y)
+        z += tl.dot(x, y)
+
+    tl.store(z_ptr + off_z, z, mask_z)
+
     return
 
 
