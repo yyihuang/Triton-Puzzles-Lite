@@ -633,10 +633,47 @@ def flashatt_spec(
 def flashatt_kernel(
     q_ptr, k_ptr, v_ptr, z_ptr, N0, T, B0: tl.constexpr, B1: tl.constexpr
 ):
+    # flash-attention v2
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     myexp = lambda x: tl.exp2(log2_e * x)
-    # Finish me!
+
+    inf = 1.0e6
+
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+    # load B0 rows of q
+    q = tl.load(q_ptr + off_i, mask=mask_i)
+
+    # running updates on
+    qk_prod_max = tl.full((B0,), -inf, dtype=tl.float32)
+    sum_exp = tl.zeros((B0,), dtype=tl.float32)
+    out = tl.zeros((B0,), dtype=tl.float32)
+
+    for j in tl.range(0, T, B1):
+        off_j = j + tl.arange(0, B1)
+        mask_j = off_j < T
+        mask_ij = mask_i[:, None] & mask_j[None, :]
+
+        # load k, v
+        k = tl.load(k_ptr + off_j, mask=mask_j)
+        v = tl.load(v_ptr + off_j, mask=mask_j)
+        qk_prod = q[:, None] * k[None, :] + tl.where(mask_ij, 0, -inf)
+
+        curr_qk_prod_max = tl.maximum(qk_prod_max, tl.max(qk_prod, axis=1))
+        scale = tl.exp2(log2_e * (qk_prod_max - curr_qk_prod_max)) # exp(m_i-1 - m_i)
+        qk_prod_exp = tl.exp2(log2_e * (qk_prod - curr_qk_prod_max[:, None])) # max should be broadcast
+        qk_prod_max = curr_qk_prod_max
+
+        curr_sum_exp = sum_exp * scale + tl.sum(qk_prod_exp, axis=1)
+        sum_exp = curr_sum_exp  # Update sum_exp for next iteration
+
+        out = out * scale + tl.sum(qk_prod_exp * v[None, :], axis=1)
+
+    # Use sum_exp directly since we've been updating it
+    out = out / sum_exp
+    tl.store(z_ptr + off_i, out, mask=mask_i)
+
     return
 
 
