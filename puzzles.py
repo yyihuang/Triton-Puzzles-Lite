@@ -706,7 +706,19 @@ def conv2d_kernel(
     x_ptr, k_ptr, z_ptr, N0, H, W, KH: tl.constexpr, KW: tl.constexpr, B0: tl.constexpr
 ):
     block_id_i = tl.program_id(0)
-    # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = off_i < N0
+
+    off_h = tl.arange(0, KH)
+    off_w = tl.arange(0, KW)
+    off_hw = off_h[:, None] * KW + off_w[None, :]
+    k = tl.load(k_ptr + off_hw) # kernel
+
+    for j in tl.range(0, H):
+        for w in tl.range(0, W):
+            pass # todo
+
+
     return
 
 
